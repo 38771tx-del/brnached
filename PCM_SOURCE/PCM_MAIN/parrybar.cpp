@@ -125,8 +125,8 @@ static bool g_lastRenderedShaky = false;
 static float g_lastRenderedOpacity = -1.0f;
 static int g_lastRenderFillWidth = 0;
 static int g_lastNonZeroFillWidth = 0;
-static const int FADE_IN_TOTAL_STEPS = 8;
-static const int FADE_OUT_TOTAL_STEPS = 8;
+static const int FADE_IN_TOTAL_STEPS = 12;
+static const int FADE_OUT_TOTAL_STEPS = 12;
 static std::chrono::steady_clock::time_point g_100PercentNoShakyStartTime;
 static bool g_100PercentNoShakyActive = false;
 static bool g_hiddenDueTo100Percent = false;
@@ -507,254 +507,92 @@ ParryResult ReadParryPercentage() {
             if (rawPercent < 0) rawPercent = 0;
             if (rawPercent > 100) rawPercent = 100;
 
-            // Time-matched smoothing with continuous adaptation (segment-based)
+            // Smooth visual percentage with float interpolation.
+            // Keeps the bar responsive, but removes the 1%-at-a-time chunky movement.
             using Clock = std::chrono::steady_clock;
             static bool smoothInit = false;
             static float smoothedPercent = 100.0f;
-            static bool rampFromZero = false;
-            static bool lastRawAboveThreshold = true;
+            static int lastRawPercent = -1;
             static Clock::time_point lastUpdate = Clock::now();
-            // Cycle tracking
-            static bool cycleActive = false;
-            static Clock::time_point cycleStartTime = Clock::now();
-            // Segment timing for adaptive estimate
-            static int lastRawSamplePercent = 0;
-            static Clock::time_point lastRawSampleTime = Clock::now();
-            static float ewmaMsPerPercent = 0.0f;
-            static int lastDisplayPercentage = 0;
-            static bool finalEaseActive = false;
-            static Clock::time_point finalEaseStart = Clock::now();
-            static int finalEaseFrom = 0;
-            static int nextDecileTarget = 10;
-            static Clock::time_point decileStartTime = Clock::now();
-            static float finalEaseDurationMs = 0.0f;
-            static std::vector<float> decileDurationsMs;
 
             auto now = Clock::now();
-            float dtMs = static_cast<float>(std::chrono::duration_cast<std::chrono::milliseconds>(now - lastUpdate).count());
+            float dtMs = std::chrono::duration<float, std::milli>(now - lastUpdate).count();
             if (dtMs <= 0.0f) dtMs = 16.0f;
             if (dtMs > 100.0f) dtMs = 100.0f;
 
             if (!smoothInit) {
                 smoothedPercent = static_cast<float>(rawPercent);
+                lastRawPercent = rawPercent;
                 lastUpdate = now;
                 smoothInit = true;
             }
 
-            if (rawPercent == 0) {
+            // A new parry cycle begins near zero, or when the read drops hard.
+            // Hard reset here so the next fill starts cleanly from the left.
+            bool newCycle = (rawPercent <= 1) || (lastRawPercent >= 0 && rawPercent + 12 < lastRawPercent);
+            if (newCycle) {
                 smoothedPercent = 0.0f;
-                cycleActive = false;
-                ewmaMsPerPercent = 0.0f;
-                rampFromZero = false;
-                lastDisplayPercentage = 0;
-                finalEaseActive = false;
-                finalEaseFrom = 0;
-                nextDecileTarget = 10;
-                decileStartTime = now;
-                decileDurationsMs.clear();
-                finalEaseDurationMs = 0.0f;
-            }
-            if (rawPercent >= 100) {
-                cycleActive = false;
-                lastDisplayPercentage = 100;
-                finalEaseActive = false;
-                nextDecileTarget = 10;
-                decileDurationsMs.clear();
-                finalEaseDurationMs = 0.0f;
-                finalEaseFrom = 0;
-            }
-            if (rawPercent <= 5) {
-                lastRawAboveThreshold = false;
-            } else if (!lastRawAboveThreshold) {
-                lastRawAboveThreshold = true;
-                rampFromZero = true;
-                smoothedPercent = 0.0f;
-            }
-
-            // After resets and state updates, if difference is huge, snap to raw
-            {
-                int ahead = rawPercent - static_cast<int>(smoothedPercent);
-                if (ahead >= 35) {
-                    smoothedPercent = static_cast<float>(rawPercent);
-                }
-            }
-
-            // Arm the cycle and initialize segment tracking on first nonzero
-            if (!cycleActive && rawPercent > 0) {
-                cycleActive = true;
-                cycleStartTime = now;
-                lastRawSamplePercent = 0;
-                lastRawSampleTime = cycleStartTime;
-                ewmaMsPerPercent = 0.0f;
-                nextDecileTarget = 10;
-                decileStartTime = now;
-                decileDurationsMs.clear();
-                finalEaseActive = false;
-                finalEaseFrom = 0;
-                finalEaseDurationMs = 0.0f;
-            }
-
-            // Update EWMA ms/percent whenever raw advances
-            if (cycleActive && rawPercent > lastRawSamplePercent) {
-                int deltaPct = rawPercent - lastRawSamplePercent;
-                float segMs = static_cast<float>(std::chrono::duration_cast<std::chrono::milliseconds>(now - lastRawSampleTime).count());
-                if (deltaPct > 0 && segMs > 0.0f) {
-                    float msPerPct = segMs / static_cast<float>(deltaPct);
-                    float alpha = 0.2f; // blend weight for adaptation
-                    if (ewmaMsPerPercent <= 0.0f) ewmaMsPerPercent = msPerPct;
-                    else ewmaMsPerPercent = (1.0f - alpha) * ewmaMsPerPercent + alpha * msPerPct;
-                }
-                lastRawSamplePercent = rawPercent;
-                lastRawSampleTime = now;
-            }
-            // Bootstrap: if raw has left zero but no EWMA yet, initialize it from the first delta
-            if (cycleActive && ewmaMsPerPercent <= 0.0f && rawPercent > 0) {
-                float estimate = dtMs / static_cast<float>(rawPercent); // ms per % from first jump
-                if (estimate < 1.0f) estimate = 1.0f;
-                if (estimate > 200.0f) estimate = 200.0f;
-                ewmaMsPerPercent = estimate;
-                lastRawSamplePercent = rawPercent;
-                lastRawSampleTime = now;
-            }
-
-            if (rawPercent < static_cast<int>(smoothedPercent)) {
-                // Monotonic: do not decrease mid-cycle
-                // (reset at raw==0 handled above)
+                lastRawPercent = rawPercent;
+                lastUpdate = now;
             } else {
-                // Drive smoothed by schedule derived from current ewmaMsPerPercent,
-                // and also ensure catch-up to finish exactly when raw is predicted to finish
-                if (cycleActive && ewmaMsPerPercent > 0.0f) {
-                    float elapsedMs = static_cast<float>(std::chrono::duration_cast<std::chrono::milliseconds>(now - cycleStartTime).count());
-                    if (elapsedMs < 0.0f) elapsedMs = 0.0f;
-                    float scheduledPercent = elapsedMs / ewmaMsPerPercent;
-                    if (scheduledPercent < 0.0f) scheduledPercent = 0.0f;
-                    if (scheduledPercent > 100.0f) scheduledPercent = 100.0f;
-
-                    // Allow a small lead over raw to avoid visible stalls
-                    const float leadMargin = 3.0f; // percent
-                    float maxAhead = static_cast<float>(rawPercent) + leadMargin;
-                    if (scheduledPercent > maxAhead) scheduledPercent = maxAhead;
-
-                    float target = (static_cast<float>(rawPercent) < scheduledPercent) ? static_cast<float>(rawPercent) : scheduledPercent;
-                    // Critically damped spring (SmoothDamp) toward target with time-to-go control
-                    static float smoothVel = 0.0f;
-                    float rawRemainMs = (100.0f - static_cast<float>(rawPercent)) * ewmaMsPerPercent;
-                    if (rawRemainMs < 1.0f) rawRemainMs = 1.0f;
-                    float smoothTimeSec = (rawRemainMs / 1000.0f) * 0.33f; // finish in ~1/3 of remaining time, adaptive
-                    if (smoothTimeSec < 0.05f) smoothTimeSec = 0.05f;
-                    float dtSec = dtMs / 1000.0f;
-                    float omega = 2.0f / smoothTimeSec;
-                    float x = omega * dtSec;
-                    float exp = 1.0f / (1.0f + x + 0.48f * x * x + 0.235f * x * x * x);
-                    float change = smoothedPercent - target;
-                    float temp = (smoothVel + omega * change) * dtSec;
-                    smoothVel = (smoothVel - omega * temp) * exp;
-                    float newValue = target + (change + temp) * exp;
-
-                    // Monotonic clamp and never exceed bounds
-                    if (newValue < smoothedPercent) newValue = smoothedPercent;
-                    if (newValue > target) newValue = target;
-                    if (newValue > static_cast<float>(rawPercent) + leadMargin) newValue = static_cast<float>(rawPercent) + leadMargin;
-
-                    // Minimum forward step to avoid freezing when target is slightly ahead
-                    float minStep = 0.2f * (dtMs / 16.0f); // ~0.2% per 16ms tick
-                    float maxStep = 1.0f * (dtMs / 16.0f); // cap ~1% per 16ms tick
-                    float desired = newValue - smoothedPercent;
-                    if (desired > 0.0f && desired < minStep) newValue = smoothedPercent + minStep;
-                    if (newValue - smoothedPercent > maxStep) newValue = smoothedPercent + maxStep;
-
-                    if (newValue < 0.0f) newValue = 0.0f;
-                    if (newValue > 100.0f) newValue = 100.0f;
-
-                    smoothedPercent = newValue;
-
-                    // Time alignment: if smoothed progress suggests it would finish later, add a boost
-                    float smoothRemainPct = 100.0f - smoothedPercent;
-                    if (rawRemainMs > 1.0f && smoothRemainPct > 0.0f) {
-                        float requiredPerMs = smoothRemainPct / rawRemainMs; // % needed per ms to finish with raw
-                        float boost = requiredPerMs * dtMs; // additional % this tick
-                        // Do not overtake raw+margin in this tick
-                        float gapToCap = (static_cast<float>(rawPercent) + leadMargin) - smoothedPercent;
-                        if (boost > gapToCap) boost = gapToCap;
-                        if (boost > 0.0f) smoothedPercent += boost;
-                    }
-                } else if (cycleActive && ewmaMsPerPercent <= 0.0f) {
-                    // If cycle active but no timing yet, nudge forward softly under raw+margin
-                    const float leadMargin = 3.0f;
-                    float cap = static_cast<float>(rawPercent) + leadMargin;
-                    float minStep = 0.2f * (dtMs / 16.0f);
-                    float maxStep = 1.0f * (dtMs / 16.0f);
-                    float step = (minStep < maxStep) ? minStep : maxStep;
-                    float next = smoothedPercent + step;
-                    if (next > cap) next = cap;
-                    if (next > 100.0f) next = 100.0f;
-                    if (next > smoothedPercent) smoothedPercent = next;
+                if (rawPercent != lastRawPercent) {
+                    lastRawPercent = rawPercent;
                 }
-                if (rampFromZero && smoothedPercent >= static_cast<float>(rawPercent)) rampFromZero = false;
+
+                float raw = static_cast<float>(rawPercent);
+
+                // Keep the visual value close to the real read. Small lead prevents stalls
+                // from looking frozen, while the lag clamp prevents it from falling behind.
+                const float leadMargin = 1.75f;
+                const float allowedLag = 8.0f;
+                if (raw - smoothedPercent > allowedLag) {
+                    smoothedPercent = raw - allowedLag;
+                }
+
+                float target = raw;
+                if (raw > smoothedPercent) {
+                    target = raw + leadMargin;
+                    if (target > 100.0f) target = 100.0f;
+                } else {
+                    // Ignore tiny backwards jitter from the pixel scan during an active cycle.
+                    target = smoothedPercent;
+                }
+                if (rawPercent >= 98) {
+                    target = 100.0f;
+                }
+
+                float responseMs = (rawPercent >= 90) ? 72.0f : 58.0f;
+                float alpha = 1.0f - expf(-dtMs / responseMs);
+                alpha = clampf(alpha, 0.0f, 1.0f);
+
+                float next = smoothedPercent + (target - smoothedPercent) * alpha;
+
+                // Frame-rate independent speed limits. These prevent visible jumps while
+                // still letting the bar catch up fast if the capture skips a few percent.
+                float frameScale = dtMs / 16.0f;
+                float minStep = 0.05f * frameScale;
+                float maxStep = ((rawPercent >= 90) ? 1.85f : 1.35f) * frameScale;
+                float delta = next - smoothedPercent;
+                if (target > smoothedPercent && delta > 0.0f) {
+                    if (delta < minStep) next = smoothedPercent + minStep;
+                    if (next - smoothedPercent > maxStep) next = smoothedPercent + maxStep;
+                }
+
+                // Monotonic during a cycle: reset handles the drop back to zero.
+                if (next < smoothedPercent) next = smoothedPercent;
+                if (next < 0.0f) next = 0.0f;
+                if (next > 100.0f) next = 100.0f;
+                smoothedPercent = next;
+                lastUpdate = now;
             }
 
-            if (smoothedPercent < 0.0f) smoothedPercent = 0.0f;
-            if (smoothedPercent > 100.0f) smoothedPercent = 100.0f;
-
-            lastUpdate = now;
+            if (rawPercent >= 100 && smoothedPercent > 99.6f) {
+                smoothedPercent = 100.0f;
+            }
 
             int percentage = static_cast<int>(smoothedPercent + 0.5f);
-            if (rawPercent > percentage + 35) {
-                smoothedPercent = static_cast<float>(rawPercent);
-                percentage = rawPercent;
-            }
-            if (!finalEaseActive) {
-                while (percentage >= nextDecileTarget && nextDecileTarget <= 90) {
-                    float segMs = static_cast<float>(std::chrono::duration_cast<std::chrono::milliseconds>(now - decileStartTime).count());
-                    if (segMs < 0.0f) segMs = 0.0f;
-                    decileDurationsMs.push_back(segMs);
-                    decileStartTime = now;
-                    nextDecileTarget += 10;
-                }
-            }
-            if (!finalEaseActive) {
-                if (percentage >= 90 && percentage < 100) {
-                    finalEaseActive = true;
-                    finalEaseStart = now;
-                    finalEaseFrom = lastDisplayPercentage > 0 ? lastDisplayPercentage : percentage;
-                    if (finalEaseFrom < 90) finalEaseFrom = 90;
-                    if (!decileDurationsMs.empty()) {
-                        float sum = 0.0f;
-                        for (float v : decileDurationsMs) sum += v;
-                        float avg = sum / static_cast<float>(decileDurationsMs.size());
-                        finalEaseDurationMs = avg;
-                    } else if (ewmaMsPerPercent > 0.0f) {
-                        finalEaseDurationMs = ewmaMsPerPercent * 10.0f;
-                    } else {
-                        finalEaseDurationMs = 144.0f;
-                    }
-                }
-            }
-            if (finalEaseActive) {
-                float elapsedMs = static_cast<float>(std::chrono::duration_cast<std::chrono::milliseconds>(now - finalEaseStart).count());
-                float denom = finalEaseDurationMs;
-                if (denom < 1.0f) denom = 1.0f;
-                float t = elapsedMs / denom;
-                if (t < 0.0f) t = 0.0f;
-                if (t > 1.0f) t = 1.0f;
-                float eased = CubicBezierEase(t);
-                int easedPerc = finalEaseFrom + static_cast<int>(((100.0f - static_cast<float>(finalEaseFrom)) * eased) + 0.5f);
-                if (easedPerc > 100) easedPerc = 100;
-                if (easedPerc < percentage) easedPerc = percentage;
-                if (easedPerc < lastDisplayPercentage) easedPerc = lastDisplayPercentage;
-                percentage = easedPerc;
-                if (t >= 1.0f || percentage >= 100) {
-                    percentage = 100;
-                    finalEaseActive = false;
-                }
-            }
-            if (percentage < lastDisplayPercentage) {
-                percentage = lastDisplayPercentage;
-            }
-            if (percentage > lastDisplayPercentage) {
-                lastDisplayPercentage = percentage;
-            }
-            
+            if (percentage < 0) percentage = 0;
+            if (percentage > 100) percentage = 100;            
             
             printf("ShakyBlock: %s\n", shakyBlock ? "True" : "False");
             
@@ -764,23 +602,23 @@ ParryResult ReadParryPercentage() {
                 g_isShakyBlock = shakyBlock;
             }
 
-            // Continuous stuck-percentage detection: if percentage remains unchanged (and not 100%)
-            // for more than 440ms, toggle the scan Y between 866 and 872.
+            // Continuous stuck-read detection: use the raw value so smoothing does not
+            // hide a scan-line stall. If raw stays unchanged for too long, toggle Y.
             {
-                static int s_lastPercentageObserved = -1;
+                static int s_lastRawPercentageObserved = -1;
                 static std::chrono::steady_clock::time_point s_lastChangeTime = std::chrono::steady_clock::now();
                 auto nowStuck = std::chrono::steady_clock::now();
 
-                if (percentage != s_lastPercentageObserved) {
-                    s_lastPercentageObserved = percentage;
+                if (rawPercent != s_lastRawPercentageObserved) {
+                    s_lastRawPercentageObserved = rawPercent;
                     s_lastChangeTime = nowStuck;
                 } else {
-                    if (percentage != 100) {
+                    if (rawPercent != 100) {
                         long long stuckMs = std::chrono::duration_cast<std::chrono::milliseconds>(nowStuck - s_lastChangeTime).count();
                         if (stuckMs > 440) {
                             if (g_baseY == 866 + 6) g_baseY = 866; else if (g_baseY == 866) g_baseY = 866 + 6;
                             s_lastChangeTime = nowStuck;
-                            s_lastPercentageObserved = -1; // force re-evaluation after switch
+                            s_lastRawPercentageObserved = -1; // force re-evaluation after switch
                         }
                     } else {
                         // At 100% we do not consider it stuck; reset timer
@@ -952,16 +790,15 @@ ParryResult ReadParryPercentage() {
                     EnsureD2D();
                     EnsureBackingStore(renderScreenW, renderScreenH);
 
-                    int currentPercentage = editorActive ? 100 : (g_freezeValues ? g_frozenPercentage : percentage);
-                    if (currentPercentage < 0) currentPercentage = 0;
-                    if (currentPercentage > 100) currentPercentage = 100;
+                    float currentPercentageF = editorActive ? 100.0f : (g_freezeValues ? static_cast<float>(g_frozenPercentage) : smoothedPercent);
+                    currentPercentageF = clampf(currentPercentageF, 0.0f, 100.0f);
+                    int currentPercentage = static_cast<int>(currentPercentageF + 0.5f);
                     
-                    int fillWidth = (int)((renderInnerW * currentPercentage) / 100.0f);
-                    if (g_fadingOut) {
-                        if (fillWidth == 0) fillWidth = g_lastNonZeroFillWidth;
-                    } else {
-                        g_lastRenderFillWidth = fillWidth;
-                        if (fillWidth > 0) g_lastNonZeroFillWidth = fillWidth;
+                    int fillWidth = (int)lroundf((renderInnerW * currentPercentageF) / 100.0f);
+                    if (fillWidth < 0) fillWidth = 0;
+                    if (fillWidth > renderInnerW) fillWidth = renderInnerW;
+                    if (g_fadingOut && fillWidth == 0) {
+                        fillWidth = g_lastNonZeroFillWidth;
                     }
                     bool drawShaky = editorActive ? false : (g_freezeValues ? g_frozenShaky : shakyBlock);
                     float currentOpacity = editorActive ? 1.0f : g_fadeOpacity.load();
@@ -1005,6 +842,7 @@ ParryResult ReadParryPercentage() {
                         g_lastRenderedOpacity = currentOpacity;
                         if (!g_fadingOut) {
                             g_lastRenderFillWidth = fillWidth;
+                            if (fillWidth > 0) g_lastNonZeroFillWidth = fillWidth;
                         }
 
                         if (!g_fadingOut || editorActive) {
