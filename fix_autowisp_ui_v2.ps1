@@ -1,4 +1,42 @@
-﻿// autowisp.cpp
+param(
+    [string]$RepoRoot = ""
+)
+
+$ErrorActionPreference = "Stop"
+
+function Get-PcmMainPath {
+    param([string]$Root)
+
+    if ([string]::IsNullOrWhiteSpace($Root)) {
+        $Root = (Get-Location).Path
+    }
+
+    $candidate1 = Join-Path $Root "PCM_SOURCE\PCM_MAIN"
+    $candidate2 = $Root
+
+    if (Test-Path (Join-Path $candidate1 "main.cpp")) {
+        return $candidate1
+    }
+
+    if ((Test-Path (Join-Path $candidate2 "main.cpp")) -and (Test-Path (Join-Path $candidate2 "compile.bat"))) {
+        return $candidate2
+    }
+
+    throw "Could not find PCM_SOURCE\PCM_MAIN. Run this from the repo root or from PCM_SOURCE\PCM_MAIN."
+}
+
+$pcmMain = Get-PcmMainPath $RepoRoot
+$mainPath = Join-Path $pcmMain "main.cpp"
+$autoPath = Join-Path $pcmMain "autowisp.cpp"
+$compilePath = Join-Path $pcmMain "compile.bat"
+
+$stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+Copy-Item $mainPath "$mainPath.bak_$stamp" -Force
+if (Test-Path $autoPath) { Copy-Item $autoPath "$autoPath.bak_$stamp" -Force }
+if (Test-Path $compilePath) { Copy-Item $compilePath "$compilePath.bak_$stamp" -Force }
+
+@'
+// autowisp.cpp
 // UI-backed Auto Wisp module for PCM_MAIN.
 // Include this from main.cpp like the other PCM modules.
 // No int main(), no OpenCV, no template folder.
@@ -332,3 +370,46 @@ static AutoStartGuard g_autoStartGuard;
 } // namespace AutoWisp
 
 #endif // PCM_AUTOWISP_UI_MODULE_INCLUDED
+'@ | Set-Content -Path $autoPath -Encoding UTF8
+
+$main = Get-Content -Raw -Path $mainPath
+if ($main -notmatch '#include\s+"autowisp\.cpp"') {
+    $patterns = @(
+        '#include "cps.cpp"',
+        '#include "quickturn.cpp"',
+        '#include "keystrokes.cpp"',
+        '#include "winrt.cpp"'
+    )
+
+    $inserted = $false
+    foreach ($pattern in $patterns) {
+        if ($main.Contains($pattern)) {
+            $main = $main.Replace($pattern, "$pattern`r`n#include ""autowisp.cpp""")
+            $inserted = $true
+            break
+        }
+    }
+
+    if (-not $inserted) { throw "Could not find a safe include location in main.cpp." }
+    Set-Content -Path $mainPath -Value $main -Encoding UTF8
+}
+
+if (Test-Path $compilePath) {
+    $bat = Get-Content -Raw -Path $compilePath
+
+    if ($bat -notmatch '_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS') {
+        $bat = $bat -replace 'cl\.exe\s+', 'cl.exe /D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS '
+    }
+
+    if ($bat -notmatch '/Fe:PCM\.exe') {
+        $bat = $bat -replace 'main\.cpp app\.res', 'main.cpp app.res /Fe:PCM.exe'
+    }
+
+    Set-Content -Path $compilePath -Value $bat -Encoding ASCII
+}
+
+Write-Host "Patched Auto Wisp UI integration v2."
+Write-Host "Backups created with suffix .bak_$stamp"
+Write-Host "Next commands:"
+Write-Host "  cd `"$pcmMain`""
+Write-Host "  compile.bat"

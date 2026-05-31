@@ -1,4 +1,4 @@
-﻿#include <windows.h>
+#include <windows.h>
 #include <d2d1.h>
 #include <dwrite.h>
 #include <windowsx.h>
@@ -28,7 +28,6 @@
 #include "keystrokes.cpp"
 #include "quickturn.cpp"
 #include "cps.cpp"
-#include "autowisp.cpp"
 void HudLayoutSaveKeystrokes(int x, int y, float scale, bool hasPos);
 void HudLayoutSaveCPS(int x, int y, float scale, bool hasPos);
 void HudLayoutSaveParryBar(int x, int y, float scale, bool hasPos);

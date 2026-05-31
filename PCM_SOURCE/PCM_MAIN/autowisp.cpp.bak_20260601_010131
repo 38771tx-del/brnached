@@ -1,12 +1,16 @@
 ﻿// autowisp.cpp
 // UI-backed Auto Wisp module for PCM_MAIN.
-// Include this from main.cpp like the other PCM modules.
-// No int main(), no OpenCV, no template folder.
-// It reads existing Auto Wisp UI settings from HKCU\Software\PCM_MENU:
+// This file is meant to be INCLUDED by main.cpp, like the other PCM modules.
+// It has no int main(), no OpenCV dependency, and no standalone window.
+// It reads the existing Auto Wisp UI/settings from HKCU\Software\PCM_MENU:
 //   ModCard_4_Enabled
 //   WispSequenceCount
 //   WispSequence_N_ScanCode
 //   WispSequence_N_Sequence
+//
+// Behavior:
+//   When Auto Wisp is enabled in the UI and Roblox is the foreground process,
+//   pressing a configured trigger key sends that row''s configured character sequence.
 
 #ifndef PCM_AUTOWISP_UI_MODULE_INCLUDED
 #define PCM_AUTOWISP_UI_MODULE_INCLUDED
@@ -45,20 +49,17 @@ static bool ReadDwordValue(HKEY key, const wchar_t* name, DWORD& out) {
     DWORD type = 0;
     DWORD size = sizeof(DWORD);
     DWORD value = 0;
-
     if (RegQueryValueExW(key, name, nullptr, &type, reinterpret_cast<LPBYTE>(&value), &size) == ERROR_SUCCESS &&
         type == REG_DWORD) {
         out = value;
         return true;
     }
-
     return false;
 }
 
 static bool ReadStringValue(HKEY key, const std::wstring& name, std::wstring& out) {
     DWORD type = 0;
     DWORD size = 0;
-
     if (RegQueryValueExW(key, name.c_str(), nullptr, &type, nullptr, &size) != ERROR_SUCCESS ||
         type != REG_SZ ||
         size < sizeof(wchar_t)) {
@@ -67,13 +68,12 @@ static bool ReadStringValue(HKEY key, const std::wstring& name, std::wstring& ou
 
     std::wstring buffer;
     buffer.resize(size / sizeof(wchar_t));
-
     if (RegQueryValueExW(key, name.c_str(), nullptr, &type,
                          reinterpret_cast<LPBYTE>(&buffer[0]), &size) != ERROR_SUCCESS) {
         return false;
     }
 
-    while (!buffer.empty() && buffer.back() == L'\0') {
+    if (!buffer.empty() && buffer.back() == L''\0'') {
         buffer.pop_back();
     }
 
@@ -102,7 +102,7 @@ static void RefreshConfigFromUiRegistry() {
     fresh.reserve(count);
 
     for (DWORD i = 0; i < count; ++i) {
-        wchar_t baseName[64] = {};
+        wchar_t baseName[64];
         swprintf_s(baseName, L"WispSequence_%lu", i);
 
         std::wstring scanName = std::wstring(baseName) + L"_ScanCode";
@@ -111,8 +111,12 @@ static void RefreshConfigFromUiRegistry() {
         DWORD scanCodeValue = 0;
         std::wstring sequenceText;
 
-        if (!ReadDwordValue(key, scanName.c_str(), scanCodeValue)) continue;
-        if (!ReadStringValue(key, sequenceName, sequenceText)) continue;
+        if (!ReadDwordValue(key, scanName.c_str(), scanCodeValue)) {
+            continue;
+        }
+        if (!ReadStringValue(key, sequenceName, sequenceText)) {
+            continue;
+        }
 
         Sequence s;
         s.triggerScanCode = static_cast<USHORT>(scanCodeValue);
@@ -125,13 +129,15 @@ static void RefreshConfigFromUiRegistry() {
 
     RegCloseKey(key);
 
-    std::lock_guard<std::mutex> lock(g_sequencesMutex);
-    g_sequences.swap(fresh);
+    {
+        std::lock_guard<std::mutex> lock(g_sequencesMutex);
+        g_sequences.swap(fresh);
+    }
 }
 
 static bool ProcessNameForPid(DWORD pid, wchar_t* outName, size_t outCount) {
     if (!outName || outCount == 0) return false;
-    outName[0] = L'\0';
+    outName[0] = L''\0'';
 
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshot == INVALID_HANDLE_VALUE) return false;
@@ -175,7 +181,9 @@ static WORD ScanCodeFromVirtualKey(WORD vk) {
 
 static WORD VirtualKeyFromScanCode(USHORT scanCode) {
     UINT vk = MapVirtualKeyW(scanCode, MAPVK_VSC_TO_VK_EX);
-    if (vk == 0) vk = MapVirtualKeyW(scanCode, MAPVK_VSC_TO_VK);
+    if (vk == 0) {
+        vk = MapVirtualKeyW(scanCode, MAPVK_VSC_TO_VK);
+    }
     return static_cast<WORD>(vk & 0xFF);
 }
 
@@ -199,7 +207,8 @@ static void TapScanCode(WORD scanCode) {
 }
 
 static void TapVirtualKey(WORD vk) {
-    TapScanCode(ScanCodeFromVirtualKey(vk));
+    WORD sc = ScanCodeFromVirtualKey(vk);
+    TapScanCode(sc);
 }
 
 static void TapCharacter(wchar_t ch) {
@@ -207,13 +216,13 @@ static void TapCharacter(wchar_t ch) {
 
     wchar_t upper = static_cast<wchar_t>(towupper(ch));
 
-    // Same behavior as the Python version: letters are sent as key taps.
-    if (upper >= L'A' && upper <= L'Z') {
+    // Match the old Python behavior: pressing letters as key taps, not Shift+letter.
+    if (upper >= L''A'' && upper <= L''Z'') {
         TapVirtualKey(static_cast<WORD>(upper));
         return;
     }
 
-    if (ch >= L'0' && ch <= L'9') {
+    if (ch >= L''0'' && ch <= L''9'') {
         TapVirtualKey(static_cast<WORD>(ch));
         return;
     }
@@ -236,7 +245,7 @@ static void TapCharacter(wchar_t ch) {
         return;
     }
 
-    // Fallback for characters without a normal VK mapping.
+    // Fallback for unmappable characters.
     INPUT input[2] = {};
     input[0].type = INPUT_KEYBOARD;
     input[0].ki.wScan = ch;
@@ -306,10 +315,11 @@ void Start() {
 
 void Stop() {
     if (!g_running.exchange(false)) return;
-    if (g_worker.joinable()) g_worker.join();
+    if (g_worker.joinable()) {
+        g_worker.join();
+    }
     g_enabled.store(false);
     g_sending.store(false);
-
     std::lock_guard<std::mutex> lock(g_sequencesMutex);
     g_sequences.clear();
 }
@@ -322,6 +332,8 @@ bool IsEnabled() {
     return g_enabled.load();
 }
 
+// Keeps Auto Wisp connected to the existing UI without requiring main.cpp
+// to call into this module. The module polls the UI registry settings.
 struct AutoStartGuard {
     AutoStartGuard() { AutoWisp::Start(); }
     ~AutoStartGuard() { AutoWisp::Stop(); }
@@ -332,3 +344,4 @@ static AutoStartGuard g_autoStartGuard;
 } // namespace AutoWisp
 
 #endif // PCM_AUTOWISP_UI_MODULE_INCLUDED
+
