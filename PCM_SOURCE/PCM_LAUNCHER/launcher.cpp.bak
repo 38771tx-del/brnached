@@ -1,4 +1,4 @@
-﻿// launcher.cpp
+// launcher.cpp
 
 #include <windows.h>
 #include <windowsx.h>
@@ -41,12 +41,6 @@ namespace fs = std::filesystem;
 #pragma comment(lib, "dwrite.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "winhttp.lib")
-
-// Temporary tester build switch.
-// Set to 0 before public/release builds.
-#ifndef PCM_TESTER_BUILD
-#define PCM_TESTER_BUILD 1
-#endif
 
 constexpr int WINDOW_WIDTH = 902;
 constexpr int WINDOW_HEIGHT = 602;
@@ -2623,10 +2617,6 @@ static std::wstring ParseAccessTokenFromProtocolURL(const std::wstring& url) {
 }
 
 static bool CheckTokenInDb(const std::wstring& accessToken) {
-#if defined(PCM_TESTER_BUILD) && PCM_TESTER_BUILD
-    (void)accessToken;
-    return true;
-#endif
     std::wstring query = L"/api/db?access_token=" + accessToken;
     HINTERNET hSession = WinHttpOpen(L"PCM_LAUNCHER/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return false;
@@ -2678,10 +2668,6 @@ static bool CheckTokenInDb(const std::wstring& accessToken) {
 }
 
 static std::wstring GetDiscordUsername(const std::wstring& accessToken) {
-#if defined(PCM_TESTER_BUILD) && PCM_TESTER_BUILD
-    (void)accessToken;
-    return L"Tester";
-#endif
     HINTERNET hSession = WinHttpOpen(L"PCM_LAUNCHER/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return L"";
     HINTERNET hConnect = WinHttpConnect(hSession, L"discord.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
@@ -2836,9 +2822,6 @@ static DWORD WINAPI TokenVerificationThread(LPVOID param) {
 }
 
 static void StartTokenVerification() {
-#if defined(PCM_TESTER_BUILD) && PCM_TESTER_BUILD
-    return;
-#endif
     if (g_tokenVerificationThread) return;
     if (!g_mainHwnd) return;
     g_tokenVerificationRunning = true;
@@ -2981,9 +2964,6 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, PWSTR cmdLine, int cmd) {
     }
 
     // Validate token synchronously before showing UI
-#if defined(PCM_TESTER_BUILD) && PCM_TESTER_BUILD
-    token = L"tester-build";
-#endif
     if (!token.empty()) {
         bool ok = CheckTokenInDb(token);
         if (ok) {
